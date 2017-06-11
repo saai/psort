@@ -1,137 +1,288 @@
-#include <assert.h>
+
+/*
+********************************************************************
+
+                    Example 28 (samplesort.c)
+
+     Objective      : To sort unsorted integers by sample sort algorithm 
+                      Write a MPI program to sort n integers, using sample
+                      sort algorithm on a p processor of PARAM 10000. 
+                      Assume n is multiple of p. Sorting is defined as the
+                      task of arranging an unordered collection of elements
+                      into monotonically increasing (or decreasing) order. 
+
+                      postcds: array[] is sorted in ascending order ANSI C 
+                      provides a quicksort function called qsort(). Its 
+                      function prototype is in the standard header file
+                      <stdlib.h>
+
+     Description    : 1. Partitioning of the input data and local sort :
+
+                      The first step of sample sort is to partition the data.
+                      Initially, each one of the p processors stores n/p
+                      elements of the sequence of the elements to be sorted.
+                      Let Ai be the sequence stored at processor Pi. In the
+                      first phase each processor sorts the local n/p elements
+                      using a serial sorting algorithm. (You can use C 
+                      library qsort() for performing this local sort).
+
+                      2. Choosing the Splitters : 
+
+                      The second phase of the algorithm determines the p-1
+                      splitter elements S. This is done as follows. Each 
+                      processor Pi selects p-1 equally spaced elements from
+                      the locally sorted sequence Ai. These p-1 elements
+                      from these p(p-1) elements are selected to be the
+                      splitters.
+
+                      3. Completing the sort :
+
+                      In the third phase, each processor Pi uses the splitters 
+                      to partition the local sequence Ai into p subsequences
+                      Ai,j such that for 0 <=j <p-1 all the elements in Ai,j
+                      are smaller than Sj , and for j=p-1 (i.e., the last 
+                      element) Ai, j contains the rest elements. Then each 
+                      processor i sends the sub-sequence Ai,j to processor Pj.
+                      Finally, each processor merge-sorts the received
+                      sub-sequences, completing the sorting algorithm.
+
+     Input          : Process with rank 0 generates unsorted integers 
+                      using C library call rand().
+
+     Output         : Process with rank 0 stores the sorted elements in 
+                      the file sorted_data_out.
+
+********************************************************************
+*/
+
 #include <stdio.h>
 #include <stdlib.h>
-#include <mpi.h>
-#include <time.h>
+#include <string.h>
+#include <assert.h>
+#include "mpi.h"
+
+#define SIZE 10
 
 
 int validate (int *output, int num_elements)
 {
-	int i = 0;
-	assert (output != NULL);
-	for (i = 0; i < num_elements - 1; i++)
-	  {
-		  if (output[i] > output[i + 1])
-		    {
-			    printf ("************* NOT sorted *************\n");
+  int i = 0;
+  assert (output != NULL);
+  for (i = 0; i < num_elements - 1; i++)
+    {
+      if (output[i] > output[i + 1])
+        {
+          printf ("************* NOT sorted *************\n");
                             printf("Element [%d]  = %d is greater than [%d] = %d \n", i, output[i], i+1, output[i+1]);
-			    return -1;
-		    }
-	  }
-	printf ("============= SORTED ===========\n");
+          return -1;
+        }
+    }
+  printf ("============= SORTED ===========\n");
         return 0;
 }
 
-int main (int argc, char **argv)
+/**** Function Declaration Section ****/
+
+static int intcompare(const void *i, const void *j)
 {
-	int *input = NULL;
-	//int *output = NULL;
-	int num_elements;
-    int  i = 0;
-    int numtasks, rank, rc;
-    unsigned int timeval = 0;
-    MPI_Status recv_status;
+  if ((*(int *)i) > (*(int *)j))
+    return (1);
+  if ((*(int *)i) < (*(int *)j))
+    return (-1);
+  return (0);
+}
 
-    int elems_per_task;
-    int adjust;
-    int part_start;
 
-    rc = MPI_Init(&argc, &argv);
-    if(rc != MPI_SUCCESS) {
-        printf("Error starting MPI program. Terminating. \n");
-        MPI_Abort(MPI_COMM_WORLD, rc);
+
+int main (int argc, char *argv[])
+{
+  /* Variable Declarations */
+
+  int        Numprocs,MyRank, Root = 0;
+  int        i,j,k, NoofElements, NoofElements_Bloc,
+                  NoElementsToSort;
+  int        count, temp;
+  int        *Input, *InputData;
+  int        *Splitter, *AllSplitter;
+  int        *Buckets, *BucketBuffer, *LocalBucket;
+  int        *OutputBuffer, *Output;
+  FILE       *InputFile, *fp;
+  MPI_Status  status; 
+
+  int *original_array = NULL;
+  FILE * file = NULL;
+  double elapsed_time;
+
+  if (argc!=2) {
+    fprintf(stderr, "Usage: mpirun -np <num_procs> %s <in_file> \n", argv[0]);
+    exit(1);
+  }
+
+
+  // read size of data
+  file = fopen(argv[1], "r");
+  fscanf(file, "%d", &NoofElements);
+
+  // read data from file
+  Input = (int *)malloc(NoofElements*sizeof(int));
+  if(Input == NULL) {
+      printf("Error : Can not allocate memory \n");
+  }
+  for (int i = 0; i < NoofElements; i++)
+    fscanf(file, "%d", &(Input[i]));
+  fclose(file);
+  
+  /**** Initialising ****/
+  
+  MPI_Init(&argc, &argv);
+  MPI_Comm_size(MPI_COMM_WORLD, &Numprocs);
+  MPI_Comm_rank(MPI_COMM_WORLD, &MyRank);
+
+
+  // start the timer
+  MPI_Barrier(MPI_COMM_WORLD);
+  elapsed_time = - MPI_Wtime();
+
+  /**** Sending Data ****/
+  MPI_Bcast (&NoofElements, 1, MPI_INT, 0, MPI_COMM_WORLD);
+  if(( NoofElements % Numprocs) != 0){
+        if(MyRank == Root)
+        printf("Number of Elements are not divisible by Numprocs \n");
+            MPI_Finalize();
+        exit(0);
+  }
+
+  NoofElements_Bloc = NoofElements / Numprocs;
+  InputData = (int *) malloc (NoofElements_Bloc * sizeof (int));
+
+  MPI_Scatter(Input, NoofElements_Bloc, MPI_INT, InputData, 
+                  NoofElements_Bloc, MPI_INT, Root, MPI_COMM_WORLD);
+
+  /**** Sorting Locally ****/
+  qsort ((char *) InputData, NoofElements_Bloc, sizeof(int), intcompare);
+
+  /**** Choosing Local Splitters ****/
+  Splitter = (int *) malloc (sizeof (int) * (Numprocs-1));
+  for (i=0; i< (Numprocs-1); i++){
+        Splitter[i] = InputData[NoofElements/(Numprocs*Numprocs) * (i+1)];
+  } 
+
+  /**** Gathering Local Splitters at Root ****/
+  AllSplitter = (int *) malloc (sizeof (int) * Numprocs * (Numprocs-1));
+  MPI_Gather (Splitter, Numprocs-1, MPI_INT, AllSplitter, Numprocs-1, 
+                  MPI_INT, Root, MPI_COMM_WORLD);
+
+  /**** Choosing Global Splitters ****/
+  if (MyRank == Root){
+    qsort ((char *) AllSplitter, Numprocs*(Numprocs-1), sizeof(int), intcompare);
+
+    for (i=0; i<Numprocs-1; i++)
+      Splitter[i] = AllSplitter[(Numprocs-1)*(i+1)];
+  }
+  
+  /**** Broadcasting Global Splitters ****/
+  MPI_Bcast (Splitter, Numprocs-1, MPI_INT, 0, MPI_COMM_WORLD);
+
+  /**** Creating Numprocs Buckets locally ****/
+  Buckets = (int *) malloc (sizeof (int) * (NoofElements + Numprocs));
+  
+  j = 0;
+  k = 1;
+
+  for (i=0; i<NoofElements_Bloc; i++){
+    if(j < (Numprocs-1)){
+       if (InputData[i] < Splitter[j]) 
+             Buckets[((NoofElements_Bloc + 1) * j) + k++] = InputData[i]; 
+       else{
+           Buckets[(NoofElements_Bloc + 1) * j] = k-1;
+            k=1;
+             j++;
+            i--;
+       }
     }
+    else 
+       Buckets[((NoofElements_Bloc + 1) * j) + k++] = InputData[i];
+  }
+  Buckets[(NoofElements_Bloc + 1) * j] = k - 1;
+      
+  /**** Sending buckets to respective processors ****/
 
-    MPI_Comm_size(MPI_COMM_WORLD, &numtasks);
-    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+  BucketBuffer = (int *) malloc (sizeof (int) * (NoofElements + Numprocs));
 
+  MPI_Alltoall (Buckets, NoofElements_Bloc + 1, MPI_INT, BucketBuffer, 
+                     NoofElements_Bloc + 1, MPI_INT, MPI_COMM_WORLD);
 
-    printf("Running with rank : %d\n", rank);
+  /**** Rearranging BucketBuffer ****/
+  LocalBucket = (int *) malloc (sizeof (int) * 2 * NoofElements / Numprocs);
 
-	if (argc < 2){
-		printf ("Usage: ./pqsort <num of elements>\n");
-	}
-    if( argc == 3){
-        timeval = (unsigned int)atof(argv[3]);
-    }
+  count = 1;
 
-    num_elements = atoi(argv[1]);
-
-    printf("Running with rank [%d] and num_elements[%d]\n", rank, num_elements);
-
-    if (!(input = (int *) calloc (num_elements, sizeof (int)))){
-        printf ("Memory error\n");
-        exit (EXIT_FAILURE);
-    }
-
-    if(rank == 0){
-        if(timeval == 0){
-            timeval = time ( NULL );
-        }
-        printf("The seed is : %d\n", timeval);
-        srand(timeval);
-        for(i = 0; i < num_elements ;i++){
-            input[i] = i;
-            //input[i] = rand()%1000000;
-        }
-        elems_per_task = (num_elements/numtasks);
-        adjust  = num_elements - elems_per_task*numtasks;
-
-        // 以下关于adjust的步骤是将多余的adjust个元素依次分配到前面的task 里面， 使得前adjust 个task 每个多一个元素。
-        if(adjust > 0){
-            part_start = elems_per_task + 1;
-            adjust --;
-        }
-        else{
-            part_start = elems_per_task;
-        }
-        for(i = 1; i < numtasks; i++){
-            if(adjust > 0){
-                MPI_Send((input + part_start), elems_per_task + 1, MPI_INT, i, 0, MPI_COMM_WORLD);
-                part_start += (elems_per_task + 1);
-                adjust -- ;
-            }
-            else{
-                MPI_Send((input + part_start), elems_per_task, MPI_INT, i, 0, MPI_COMM_WORLD);
-                part_start += (elems_per_task);
-            }
-        }
-
-    }
-    else{
-        printf("My rank is : %d\n", rank);
-        elems_per_task = (num_elements/numtasks);
-        adjust  = num_elements - elems_per_task*numtasks;
-        part_start = 0;
-        for(i=0; i < rank; i++){
-            if(adjust > 0){
-                part_start += (elems_per_task + 1);
-                adjust --;
-            }
-            else{
-                part_start += (elems_per_task);
-            }
-        }
-                
-        if(adjust > 0){
-            MPI_Recv((input + part_start), elems_per_task+ 1, MPI_INT, 0, 0, MPI_COMM_WORLD, &recv_status);
-        }
-        else{
-            MPI_Recv((input + part_start), elems_per_task, MPI_INT, 0, 0, MPI_COMM_WORLD, &recv_status);
-        }
-        for(i = part_start; i < part_start + elems_per_task; i ++){
-            printf("[%d] [%d] = [%d] \n", rank, i, input[i]);
-        }
-
-    }
-
-
+  for (j=0; j<Numprocs; j++) {
+  k = 1;
+    for (i=0; i<BucketBuffer[(NoofElements/Numprocs + 1) * j]; i++) 
+      LocalBucket[count++] = BucketBuffer[(NoofElements/Numprocs + 1) * j + k++];
+  }
+  LocalBucket[0] = count-1;
     
+  /**** Sorting Local Buckets using Bubble Sort ****/
+  /*qsort ((char *) InputData, NoofElements_Bloc, sizeof(int), intcompare); */
 
-    MPI_Finalize();
+  NoElementsToSort = LocalBucket[0];
+  qsort ((char *) &LocalBucket[1], NoElementsToSort, sizeof(int), intcompare); 
 
-        /*
-	if(validate (output, num_elements) != 0)
-                return EXIT_FAILURE;
-                */
-	return EXIT_SUCCESS;
+  /**** Gathering sorted sub blocks at root ****/
+  if(MyRank == Root) {
+        OutputBuffer = (int *) malloc (sizeof(int) * 2 * NoofElements);
+        Output = (int *) malloc (sizeof (int) * NoofElements);
+  }
+
+  MPI_Gather (LocalBucket, 2*NoofElements_Bloc, MPI_INT, OutputBuffer, 
+                  2*NoofElements_Bloc, MPI_INT, Root, MPI_COMM_WORLD);
+
+  // stop the timer
+  elapsed_time += MPI_Wtime();
+
+  /**** Rearranging output buffer ****/
+    if (MyRank == Root){
+        count = 0;
+        for(j=0; j<Numprocs; j++){
+          k = 1;
+         for(i=0; i<OutputBuffer[(2 * NoofElements/Numprocs) * j]; i++) 
+                 Output[count++] = OutputBuffer[(2*NoofElements/Numprocs) * j + k++];
+        }
+      printf("pqsort %d ints on %d procs: %f secs\n", NoofElements, Numprocs, elapsed_time);
+      validate(Output,NoofElements);
+
+      // /**** Printng the output ****/
+      // if ((fp = fopen("sort.out", "w")) == NULL){
+      //     printf("Can't Open Output File \n");
+      //     exit(0);
+      // }
+       
+      // fprintf (fp, "Number of Elements to be sorted : %d \n", NoofElements);
+      // printf ( "Number of Elements to be sorted : %d \n", NoofElements);
+      // fprintf (fp, "The sorted sequence is : \n");
+      // printf( "Sorted output sequence is\n\n");
+      // for (i=0; i<NoofElements; i++){
+      //     fprintf(fp, "%d\n", Output[i]);
+      //     printf( "%d   ", Output[i]);
+      // } 
+      // printf ( " \n " );
+      // fclose(fp);
+      free(Input);
+      free(OutputBuffer);
+      free(Output);
+   }/* MyRank==0*/
+
+    free(InputData);
+    free(Splitter);
+    free(AllSplitter);
+    free(Buckets);
+    free(BucketBuffer);
+    free(LocalBucket);
+
+   /**** Finalize ****/
+   MPI_Finalize();
+}
+
+

@@ -14,13 +14,25 @@ int main(int argc, char** argv) {
 	
 	/********** Create and populate the array **********/
 	int res = 0;
-	int n = atoi(argv[1]);
-	int *original_array = malloc(n * sizeof(int));
-	
-	srand(time(NULL));
-	for(int c = 0; c < n; c++) {
-		original_array[c] = rand() % n;
-		}
+	int n;
+	int *original_array = NULL;
+	FILE * file = NULL;
+	double elapsed_time;
+
+	if (argc!=2) {
+	    fprintf(stderr, "Usage: mpirun -np <num_procs> %s <in_file> \n", argv[0]);
+	    exit(1);
+  	}
+
+	// read size of data
+    file = fopen(argv[1], "r");
+    fscanf(file, "%d", &n);
+
+    // read data from file
+    original_array = (int *)malloc(n*sizeof(int));
+    for (int i = 0; i < n; i++)
+      fscanf(file, "%d", &(original_array[i]));
+    fclose(file);
 	
 	/********** Initialize MPI **********/
 	int world_rank;
@@ -30,13 +42,10 @@ int main(int argc, char** argv) {
 	MPI_Comm_rank(MPI_COMM_WORLD, &world_rank);
 	MPI_Comm_size(MPI_COMM_WORLD, &world_size);
 	
-	if(world_rank == 0){
-		printf("This is the unsorted array with %d numbers: \n\n",n);
-		for(int c = 0; c < n; c++) {
-			printf("%d ", original_array[c]);
-			}
-		printf("\n\n");
-	}
+	// start the timer
+  	MPI_Barrier(MPI_COMM_WORLD);
+  	elapsed_time = - MPI_Wtime();
+
 
 	/********** Divide the array in equal-sized chunks **********/
 	int size = n/world_size;
@@ -66,14 +75,14 @@ int main(int argc, char** argv) {
 		// mergeSort(sorted, other_array, 0, (n - 1));
 		finalMerge(sorted,other_array,n,size);
 		/********** Display the sorted array **********/
-		printf("This is the sorted array: ");
-		for(int c = 0; c < n; c++) {
+		// printf("This is the sorted array: ");
+		// for(int c = 0; c < n; c++) {
 			
-			printf("%d ", sorted[c]);
+		// 	printf("%d ", sorted[c]);
 			
-			}
-		printf("\n");
-		printf("\n");
+		// 	}
+		// printf("\n");
+		// printf("\n");
 		/********** Validate the sorted array **********/
 		res = validate(sorted, n);
 
@@ -82,8 +91,14 @@ int main(int argc, char** argv) {
 		free(sorted);
 		free(other_array);
 			
-		}
-	
+	}
+	// stop the timer
+  	elapsed_time += MPI_Wtime();
+  	if (world_rank == 0){
+	    printf("Mergesort %d ints on %d procs: %f secs\n", n, world_size, elapsed_time);
+  	}
+
+
 	/********** Clean up rest **********/
 	free(original_array);
 	free(sub_array);
